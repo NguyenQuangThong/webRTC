@@ -37,7 +37,7 @@ async function joinRoom() {
         const { token } = await response.json();
 
         // 2. Setup Room
-        room = new LiveKit.Room({
+        room = new LivekitClient.Room({
             adaptiveStream: true,
             dynacast: true,
             publishDefaults: {
@@ -47,16 +47,32 @@ async function joinRoom() {
 
         // 3. Connect to room
         // NOTE: In production, the host should be configurable. 
-        // For development, we assume LiveKit is running on localhost:7880
-        await room.connect('ws://localhost:7880', token);
+        // For development, use 127.0.0.1 to avoid localhost resolution issues.
+        console.log("Connecting to LiveKit at 127.0.0.1...");
+
+        await room.connect('ws://127.0.0.1:7880', token, {
+            autoSubscribe: true,
+        });
         console.log('Connected to room', room.name);
+
+        // Debug: Log connection state changes
+        room.on(LivekitClient.RoomEvent.ConnectionStateChanged, (state) => {
+            console.log('Connection state changed:', state);
+        });
 
         // 4. Set up event listeners
         setupRoomListeners();
 
-        // 5. Publish local media
-        await room.localParticipant.enableCameraAndMicrophone();
-        handleParticipantJoined(room.localParticipant);
+        // 5. Handle existing participants who are already in the room
+        room.remoteParticipants.forEach(handleParticipantJoined);
+
+        // 6. Publish local media
+        try {
+            await room.localParticipant.enableCameraAndMicrophone();
+            handleParticipantJoined(room.localParticipant);
+        } catch (mediaErr) {
+            console.warn("Could not publish media (camera/mic):", mediaErr);
+        }
 
         // Transition UI
         lobby.classList.add('app-hidden');
@@ -70,18 +86,18 @@ async function joinRoom() {
 
 function setupRoomListeners() {
     room
-        .on(LiveKit.RoomEvent.ParticipantConnected, handleParticipantJoined)
-        .on(LiveKit.RoomEvent.ParticipantDisconnected, handleParticipantLeft)
-        .on(LiveKit.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        .on(LivekitClient.RoomEvent.ParticipantConnected, handleParticipantJoined)
+        .on(LivekitClient.RoomEvent.ParticipantDisconnected, handleParticipantLeft)
+        .on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
             attachTrack(track, participant);
         })
-        .on(LiveKit.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        .on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
             track.detach();
         })
-        .on(LiveKit.RoomEvent.LocalTrackPublished, (publication, participant) => {
+        .on(LivekitClient.RoomEvent.LocalTrackPublished, (publication, participant) => {
             attachTrack(publication.track, participant);
         })
-        .on(LiveKit.RoomEvent.DataReceived, (payload, participant) => {
+        .on(LivekitClient.RoomEvent.DataReceived, (payload, participant) => {
             const str = new TextDecoder().decode(payload);
             try {
                 const data = JSON.parse(str);
@@ -95,45 +111,63 @@ function setupRoomListeners() {
 }
 
 function handleParticipantJoined(participant) {
+    if (!participant) return;
     console.log('Participant joined:', participant.identity);
     createParticipantContainer(participant);
 
-    // For participants already in the room
-    participant.tracks.forEach(publication => {
-        if (publication.isSubscribed && publication.track) {
-            attachTrack(publication.track, participant);
-        }
-    });
+    // Support both older and newer SDK versions, and be defensive
+    const trackPubs = participant.trackPublications || participant.tracks;
+    if (trackPubs && typeof trackPubs.forEach === 'function') {
+        trackPubs.forEach(publication => {
+            if (publication.track) {
+                attachTrack(publication.track, participant);
+            }
+        });
+    }
 }
 
 function handleParticipantLeft(participant) {
     console.log('Participant left:', participant.identity);
-    const container = document.getElementById(`p-${participant.identity}`);
-    if (container) container.remove();
+    // Remove all containers (camera and screen)
+    const containers = document.querySelectorAll(`[id^="p-${participant.identity}"]`);
+    containers.forEach(container => container.remove());
 }
 
-function createParticipantContainer(participant) {
-    if (document.getElementById(`p-${participant.identity}`)) return;
+function createParticipantContainer(participant, isScreen = false) {
+    const containerId = isScreen ? `p-${participant.identity}-screen` : `p-${participant.identity}`;
+    if (document.getElementById(containerId)) return;
 
     const container = document.createElement('div');
-    container.id = `p-${participant.identity}`;
-    container.className = 'video-wrapper';
+    container.id = containerId;
+    container.className = isScreen ? 'video-wrapper screen-share' : 'video-wrapper';
 
     const nameLabel = document.createElement('div');
     nameLabel.className = 'user-name';
-    nameLabel.innerText = participant.identity + (participant === room.localParticipant ? ' (You)' : '');
+    const displayName = participant.identity + (participant === room.localParticipant ? ' (You)' : '');
+    nameLabel.innerText = isScreen ? `${displayName}'s Screen` : displayName;
     container.appendChild(nameLabel);
 
     videoContainer.appendChild(container);
 }
 
 function attachTrack(track, participant) {
-    const container = document.getElementById(`p-${participant.identity}`);
+    // Determine if this is a screen share
+    const isScreen = track.source === LivekitClient.Track.Source.ScreenShare;
+
+    // Ensure container exists
+    createParticipantContainer(participant, isScreen);
+
+    const containerId = isScreen ? `p-${participant.identity}-screen` : `p-${participant.identity}`;
+    const container = document.getElementById(containerId);
     if (!container) return;
 
     if (track.kind === 'video' || track.kind === 'audio') {
         const element = track.attach();
         container.appendChild(element);
+
+        if (element instanceof HTMLVideoElement) {
+            element.play().catch(e => console.warn("Autoplay blocked or track failed to play:", e));
+        }
     }
 }
 
@@ -143,7 +177,7 @@ async function sendMessage() {
     if (text && room) {
         const data = JSON.stringify({ type: 'chat', text });
         const encoder = new TextEncoder();
-        await room.localParticipant.publishData(encoder.encode(data), LiveKit.DataPacket_Kind.RELIABLE);
+        await room.localParticipant.publishData(encoder.encode(data), LivekitClient.DataPacket_Kind.RELIABLE);
         appendMessage(text, 'sent', 'You');
         chatInput.value = '';
     }
