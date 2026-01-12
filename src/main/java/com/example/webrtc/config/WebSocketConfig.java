@@ -12,7 +12,8 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(new SignalingHandler(), "/signal")
-                .setAllowedOrigins("*");
+        // Legacy P2P signaling - no longer needed with LiveKit
+        // registry.addHandler(new SignalingHandler(), "/signal")
+        //         .setAllowedOrigins("*");
     }
 }

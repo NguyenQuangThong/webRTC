@@ -1,5 +1,4 @@
-const localVideo = document.getElementById('localVideo');
-const remoteVideo = document.getElementById('remoteVideo');
+const videoContainer = document.getElementById('video-container');
 const chatMessages = document.getElementById('chat-messages');
 const chatInput = document.getElementById('chatInput');
 const sendBtn = document.getElementById('sendBtn');
@@ -11,107 +10,18 @@ const hangup = document.getElementById('hangup');
 const lobby = document.getElementById('lobby');
 const callUI = document.getElementById('call-ui');
 const roomInput = document.getElementById('roomInput');
+const identityInput = document.getElementById('identityInput');
 const joinBtn = document.getElementById('joinBtn');
 const roomNameDisplay = document.getElementById('roomNameDisplay');
-const remoteStatus = document.getElementById('remoteStatus');
 
-let localStream;
-let peerConnection;
-let socket;
-let screenStream;
+let room;
 let currentRoom;
 
-// Perfect Negotiation state
-let makingOffer = false;
-let ignoreOffer = false;
-let isSettingRemoteAnswerPending = false;
-let polite = false;
-
-const config = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' }
-    ],
-    iceCandidatePoolSize: 10
-};
-
-// Initialize WebSocket
-function initWebSocket(roomId) {
-    return new Promise((resolve) => {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        socket = new WebSocket(`${protocol}//${window.location.host}/signal?room=${roomId}`);
-
-        socket.onopen = () => console.log("WebSocket connected to room:", roomId);
-
-        socket.onmessage = async ({ data }) => {
-            try {
-                const message = JSON.parse(data);
-                console.log("Signaling message received:", message.type);
-
-                if (message.type === 'role') {
-                    polite = message.role === 'answerer';
-                    console.log(`Assigned role: ${message.role} (polite: ${polite})`);
-                    createPeerConnection();
-                    resolve();
-                } else if (message.type === 'peer-joined') {
-                    console.log("New peer joined! Peer is now ready.");
-                    if (!polite) { // Offerer (creator) initiates when someone joins
-                        console.log("Initiating media stream and negotiation...");
-                        startNegotiation();
-                    }
-                } else if (!peerConnection) {
-                    console.warn("Received signaling message before PeerConnection was created. Ignoring.");
-                    return;
-                } else if (message.type === 'description') {
-                    const description = new RTCSessionDescription(message.sdp);
-                    const offerCollision = (description.type === 'offer') &&
-                        (makingOffer || peerConnection.signalingState !== 'stable');
-
-                    ignoreOffer = !polite && offerCollision;
-                    if (ignoreOffer) {
-                        console.log("Collision detected: Ignoring offer (impolite)");
-                        return;
-                    }
-
-                    if (offerCollision) {
-                        console.log("Collision detected: Rolling back for polite peer");
-                        await Promise.all([
-                            peerConnection.setLocalDescription({ type: 'rollback' }),
-                            peerConnection.setRemoteDescription(description)
-                        ]);
-                    } else {
-                        await peerConnection.setRemoteDescription(description);
-                    }
-
-                    if (description.type === 'offer') {
-                        await peerConnection.setLocalDescription();
-                        socket.send(JSON.stringify({ type: 'description', sdp: peerConnection.localDescription }));
-                    }
-                } else if (message.type === 'candidate') {
-                    try {
-                        console.log("Adding ICE candidate");
-                        await peerConnection.addIceCandidate(message.candidate);
-                    } catch (err) {
-                        if (!ignoreOffer) console.error("Error adding candidate:", err);
-                    }
-                } else if (message.type === 'chat') {
-                    appendMessage(message.text, 'received');
-                }
-            } catch (err) {
-                console.error("Signaling error:", err);
-            }
-        };
-
-        socket.onclose = () => {
-            console.log("WebSocket closed");
-        };
-    });
-}
-
+// Initialize LiveKit Room
 async function joinRoom() {
     const roomId = roomInput.value.trim();
+    const identity = identityInput.value.trim() || 'User_' + Math.floor(Math.random() * 1000);
+
     if (!roomId) {
         roomInput.classList.add('error');
         setTimeout(() => roomInput.classList.remove('error'), 400);
@@ -122,165 +32,175 @@ async function joinRoom() {
     roomNameDisplay.innerText = `Room: ${roomId}`;
 
     try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        localVideo.srcObject = localStream;
+        // 1. Get token from backend
+        const response = await fetch(`/getToken?room=${roomId}&identity=${identity}`);
+        const { token } = await response.json();
+
+        // 2. Setup Room
+        room = new LiveKit.Room({
+            adaptiveStream: true,
+            dynacast: true,
+            publishDefaults: {
+                videoSimulcast: true,
+            },
+        });
+
+        // 3. Connect to room
+        // NOTE: In production, the host should be configurable. 
+        // For development, we assume LiveKit is running on localhost:7880
+        await room.connect('ws://localhost:7880', token);
+        console.log('Connected to room', room.name);
+
+        // 4. Set up event listeners
+        setupRoomListeners();
+
+        // 5. Publish local media
+        await room.localParticipant.enableCameraAndMicrophone();
+        handleParticipantJoined(room.localParticipant);
 
         // Transition UI
         lobby.classList.add('app-hidden');
         callUI.classList.remove('app-hidden');
 
-        await initWebSocket(roomId);
-
-        // If I am the joiner (answerer/polite), I start immediately
-        // The creator (offerer/impolite) waits for 'peer-joined'
-        if (polite) {
-            console.log("Joined as answerer, starting negotiation immediately...");
-            startNegotiation();
-        } else {
-            console.log("Joined as creator, waiting for peer to join...");
-        }
     } catch (err) {
         console.error("Failed to join room:", err);
-        alert("Could not access camera/microphone. Please check permissions.");
+        alert("Could not connect to LiveKit. Make sure LiveKit server is running at http://localhost:7880 \nError: " + err.message);
     }
 }
 
-function startNegotiation() {
-    if (!peerConnection || !localStream) {
-        console.warn("Cannot start negotiation: PC or localStream missing");
-        return;
-    }
+function setupRoomListeners() {
+    room
+        .on(LiveKit.RoomEvent.ParticipantConnected, handleParticipantJoined)
+        .on(LiveKit.RoomEvent.ParticipantDisconnected, handleParticipantLeft)
+        .on(LiveKit.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+            attachTrack(track, participant);
+        })
+        .on(LiveKit.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+            track.detach();
+        })
+        .on(LiveKit.RoomEvent.LocalTrackPublished, (publication, participant) => {
+            attachTrack(publication.track, participant);
+        })
+        .on(LiveKit.RoomEvent.DataReceived, (payload, participant) => {
+            const str = new TextDecoder().decode(payload);
+            try {
+                const data = JSON.parse(str);
+                if (data.type === 'chat') {
+                    appendMessage(data.text, 'received', participant?.identity || 'System');
+                }
+            } catch (e) {
+                console.error("Error parsing data message", e);
+            }
+        });
+}
 
-    // Check if tracks are already added to avoid duplicates
-    const senders = peerConnection.getSenders();
-    if (senders.length === 0) {
-        console.log("Adding tracks to PeerConnection");
-        for (const track of localStream.getTracks()) {
-            peerConnection.addTrack(track, localStream);
+function handleParticipantJoined(participant) {
+    console.log('Participant joined:', participant.identity);
+    createParticipantContainer(participant);
+
+    // For participants already in the room
+    participant.tracks.forEach(publication => {
+        if (publication.isSubscribed && publication.track) {
+            attachTrack(publication.track, participant);
         }
-    } else {
-        console.log("Tracks already added, negotiation should trigger via onnegotiationneeded or restartIce");
+    });
+}
+
+function handleParticipantLeft(participant) {
+    console.log('Participant left:', participant.identity);
+    const container = document.getElementById(`p-${participant.identity}`);
+    if (container) container.remove();
+}
+
+function createParticipantContainer(participant) {
+    if (document.getElementById(`p-${participant.identity}`)) return;
+
+    const container = document.createElement('div');
+    container.id = `p-${participant.identity}`;
+    container.className = 'video-wrapper';
+
+    const nameLabel = document.createElement('div');
+    nameLabel.className = 'user-name';
+    nameLabel.innerText = participant.identity + (participant === room.localParticipant ? ' (You)' : '');
+    container.appendChild(nameLabel);
+
+    videoContainer.appendChild(container);
+}
+
+function attachTrack(track, participant) {
+    const container = document.getElementById(`p-${participant.identity}`);
+    if (!container) return;
+
+    if (track.kind === 'video' || track.kind === 'audio') {
+        const element = track.attach();
+        container.appendChild(element);
     }
 }
 
-function createPeerConnection() {
-    peerConnection = new RTCPeerConnection(config);
-
-    peerConnection.onnegotiationneeded = async () => {
-        try {
-            makingOffer = true;
-            await peerConnection.setLocalDescription();
-            socket.send(JSON.stringify({ type: 'description', sdp: peerConnection.localDescription }));
-        } catch (err) {
-            console.error(err);
-        } finally {
-            makingOffer = false;
-        }
-    };
-
-    peerConnection.onicecandidate = ({ candidate }) => {
-        if (candidate) {
-            socket.send(JSON.stringify({ type: 'candidate', candidate }));
-        }
-    };
-
-    peerConnection.ontrack = (event) => {
-        console.log("Remote track received:", event.track.kind);
-        const stream = event.streams[0];
-        if (remoteVideo.srcObject !== stream) {
-            remoteVideo.srcObject = stream;
-            remoteStatus.classList.add('app-hidden');
-        }
-    };
-
-    peerConnection.onconnectionstatechange = () => {
-        console.log(`Connection state: ${peerConnection.connectionState}`);
-        if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
-            remoteStatus.innerText = "Peer disconnected";
-            remoteStatus.classList.remove('app-hidden');
-        }
-    };
-}
-
-// Event Listeners
-joinBtn.onclick = joinRoom;
-roomInput.onkeypress = (e) => {
-    if (e.key === 'Enter') joinRoom();
-};
-
-sendBtn.onclick = () => {
+// Chat Logic
+async function sendMessage() {
     const text = chatInput.value.trim();
-    if (text && socket) {
-        socket.send(JSON.stringify({ type: 'chat', text }));
-        appendMessage(text, 'sent');
+    if (text && room) {
+        const data = JSON.stringify({ type: 'chat', text });
+        const encoder = new TextEncoder();
+        await room.localParticipant.publishData(encoder.encode(data), LiveKit.DataPacket_Kind.RELIABLE);
+        appendMessage(text, 'sent', 'You');
         chatInput.value = '';
     }
-};
+}
 
-chatInput.onkeypress = (e) => {
-    if (e.key === 'Enter') sendBtn.onclick();
-};
-
-function appendMessage(text, side) {
+function appendMessage(text, side, sender) {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${side}`;
-    msgDiv.innerText = text;
+
+    const senderSpan = document.createElement('div');
+    senderSpan.style.fontSize = '10px';
+    senderSpan.style.marginBottom = '4px';
+    senderSpan.style.opacity = '0.7';
+    senderSpan.innerText = sender;
+
+    msgDiv.appendChild(senderSpan);
+    msgDiv.appendChild(document.createTextNode(text));
+
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 // Controls
-toggleAudio.onclick = () => {
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        toggleAudio.classList.toggle('active', !audioTrack.enabled);
-        toggleAudio.innerHTML = audioTrack.enabled ? '<i class="fas fa-microphone"></i>' : '<i class="fas fa-microphone-slash"></i>';
-    }
+toggleAudio.onclick = async () => {
+    const enabled = !room.localParticipant.isMicrophoneEnabled;
+    await room.localParticipant.setMicrophoneEnabled(enabled);
+    toggleAudio.classList.toggle('active', !enabled);
+    toggleAudio.innerHTML = enabled ? '<i class="fas fa-microphone"></i>' : '<i class="fas fa-microphone-slash"></i>';
 };
 
-toggleVideo.onclick = () => {
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        toggleVideo.classList.toggle('active', !videoTrack.enabled);
-        toggleVideo.innerHTML = videoTrack.enabled ? '<i class="fas fa-video"></i>' : '<i class="fas fa-video-slash"></i>';
-    }
+toggleVideo.onclick = async () => {
+    const enabled = !room.localParticipant.isCameraEnabled;
+    await room.localParticipant.setCameraEnabled(enabled);
+    toggleVideo.classList.toggle('active', !enabled);
+    toggleVideo.innerHTML = enabled ? '<i class="fas fa-video"></i>' : '<i class="fas fa-video-slash"></i>';
 };
 
 shareScreen.onclick = async () => {
-    try {
-        if (!screenStream) {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-            const screenTrack = screenStream.getVideoTracks()[0];
-
-            const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
-            if (sender) sender.replaceTrack(screenTrack);
-
-            localVideo.srcObject = screenStream;
-            screenTrack.onended = () => stopScreenShare();
-            shareScreen.classList.add('active');
-        } else {
-            stopScreenShare();
-        }
-    } catch (err) {
-        console.error("Error sharing screen:", err);
-    }
+    const enabled = !room.localParticipant.isScreenShareEnabled;
+    await room.localParticipant.setScreenShareEnabled(enabled);
+    shareScreen.classList.toggle('active', enabled);
 };
 
-function stopScreenShare() {
-    const videoTrack = localStream.getVideoTracks()[0];
-    const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
-    if (sender) sender.replaceTrack(videoTrack);
-    localVideo.srcObject = localStream;
-
-    if (screenStream) {
-        screenStream.getTracks().forEach(track => track.stop());
-        screenStream = null;
-    }
-    shareScreen.classList.remove('active');
-}
-
 hangup.onclick = () => {
+    if (room) room.disconnect();
     location.reload();
+};
+
+sendBtn.onclick = sendMessage;
+chatInput.onkeypress = (e) => {
+    if (e.key === 'Enter') sendMessage();
+};
+
+joinBtn.onclick = joinRoom;
+roomInput.onkeypress = (e) => {
+    if (e.key === 'Enter') joinRoom();
+};
+identityInput.onkeypress = (e) => {
+    if (e.key === 'Enter') joinRoom();
 };

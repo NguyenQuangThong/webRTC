@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
 
 <body>
@@ -23,12 +24,16 @@
 
             <div class="room-actions">
                 <div class="input-group">
+                    <label for="identityInput">Your Name</label>
+                    <input type="text" id="identityInput" placeholder="Enter your display name" autocomplete="off">
+                </div>
+                <div class="input-group">
                     <label for="roomInput">Room Identifier</label>
                     <input type="text" id="roomInput" placeholder="Enter room name (e.g., project-alpha)"
                         autocomplete="off">
                 </div>
                 <button id="joinBtn" class="primary-btn">
-                    <span>Join or Create Room</span>
+                    <span>Join Room</span>
                     <i class="fas fa-arrow-right"></i>
                 </button>
             </div>
@@ -52,16 +57,8 @@
 
     <div id="call-ui" class="app-hidden">
         <div id="app">
-            <div class="video-container">
-                <div class="video-wrapper">
-                    <video id="localVideo" autoplay playsinline muted></video>
-                    <div class="user-name">You (Local)</div>
-                </div>
-                <div class="video-wrapper" id="remoteVideoWrapper">
-                    <video id="remoteVideo" autoplay playsinline></video>
-                    <div class="user-name">Remote Peer</div>
-                    <div id="remoteStatus" class="remote-status">Waiting for peer...</div>
-                </div>
+            <div class="video-container" id="video-container">
+                <!-- Videos will be added here dynamically -->
             </div>
 
             <div class="chat-container">

@@ -1,3 +1,9 @@
 spring:
   application:
     name: webrtc
+
+livekit:
+  api:
+    key: devkey
+    secret: secret
+    host: http://localhost:7880
