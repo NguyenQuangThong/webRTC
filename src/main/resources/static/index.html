@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Premium - Chat & Video</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <div class="video-container">
+            <div class="video-wrapper">
+                <video id="localVideo" autoplay playsinline muted></video>
+                <div class="user-name">You (Local)</div>
+            </div>
+            <div class="video-wrapper" id="remoteVideoWrapper">
+                <video id="remoteVideo" autoplay playsinline></video>
+                <div class="user-name">Remote Peer</div>
+            </div>
+        </div>
+
+        <div class="chat-container">
+            <div class="chat-header">
+                <i class="fas fa-comments"></i> Live Chat
+            </div>
+            <div id="chat-messages">
+                <!-- Messages will appear here -->
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chatInput" placeholder="Type a message...">
+                <button id="sendBtn"><i class="fas fa-paper-plane"></i></button>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="control-btn" id="toggleAudio" title="Toggle Microphone">
+            <i class="fas fa-microphone"></i>
+        </button>
+        <button class="control-btn" id="toggleVideo" title="Toggle Camera">
+            <i class="fas fa-video"></i>
+        </button>
+        <button class="control-btn" id="shareScreen" title="Share Screen">
+            <i class="fas fa-desktop"></i>
+        </button>
+        <button class="control-btn danger" id="hangup" title="End Call">
+            <i class="fas fa-phone-slash"></i>
+        </button>
+    </div>
+
+    <script src="js/webrtc.js"></script>
+</body>
+</html>
